@@ -12,6 +12,7 @@ This file provides guidance to AI coding agents working on the `skills` CLI code
 | ----------------------------- | --------------------------------------------------- |
 | `skills`                      | Show banner with available commands                 |
 | `skills add <pkg>`            | Install skills from git repos, URLs, or local paths |
+| `skills use <pkg>@<skill>`    | Pipe one skill as a prompt to a coding agent        |
 | `skills experimental_install` | Restore skills from skills-lock.json                |
 | `skills experimental_sync`    | Sync skills from node_modules into agent dirs       |
 | `skills list`                 | List installed skills (alias: `ls`)                 |

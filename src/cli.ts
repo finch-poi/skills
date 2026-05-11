@@ -12,6 +12,7 @@ import { runSync, parseSyncOptions } from './sync.ts';
 import { flushTelemetry } from './telemetry.ts';
 import { isRunningInAgent } from './detect-agent.ts';
 import { runUpdate } from './update.ts';
+import { runUse, parseUseOptions } from './use.ts';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -69,6 +70,9 @@ function showBanner(): void {
     `  ${DIM}$${RESET} ${TEXT}npx skills add ${DIM}<package>${RESET}        ${DIM}Add a new skill${RESET}`
   );
   console.log(
+    `  ${DIM}$${RESET} ${TEXT}npx skills use ${DIM}<package>@<skill>${RESET} ${DIM}Pipe a skill to an agent${RESET}`
+  );
+  console.log(
     `  ${DIM}$${RESET} ${TEXT}npx skills remove${RESET}               ${DIM}Remove installed skills${RESET}`
   );
   console.log(
@@ -106,6 +110,8 @@ ${BOLD}Manage Skills:${RESET}
   add <package>        Add a skill package (alias: a)
                        e.g. vercel-labs/agent-skills
                             https://github.com/vercel-labs/agent-skills
+  use <package>@<skill>
+                       Generate a prompt for running one skill without installing it
   remove [skills]      Remove installed skills
   list, ls             List installed skills
   find [query]         Search for skills interactively
@@ -133,6 +139,12 @@ ${BOLD}Add Options:${RESET}
   --all                  Shorthand for --skill '*' --agent '*' -y
   --full-depth           Search all subdirectories even when a root SKILL.md exists
 
+${BOLD}Use Options:${RESET}
+  -s, --skill <skill>    Specify the skill to use
+  --full-depth           Search all subdirectories even when a root SKILL.md exists
+  --dangerously-accept-openclaw-risks
+                         Allow unverified OpenClaw community skills
+
 ${BOLD}Remove Options:${RESET}
   -g, --global           Remove from global scope
   -a, --agent <agents>   Remove from specific agents (use '*' for all agents)
@@ -155,6 +167,8 @@ ${BOLD}Options:${RESET}
 
 ${BOLD}Examples:${RESET}
   ${DIM}$${RESET} skills add vercel-labs/agent-skills
+  ${DIM}$${RESET} skills use vercel-labs/agent-skills@nextjs | claude
+  ${DIM}$${RESET} skills use vercel-labs/agent-skills --skill nextjs | claude
   ${DIM}$${RESET} skills add vercel-labs/agent-skills -g
   ${DIM}$${RESET} skills add vercel-labs/agent-skills --agent claude-code cursor
   ${DIM}$${RESET} skills add vercel-labs/agent-skills --skill pr-review commit
@@ -317,6 +331,15 @@ async function main(): Promise<void> {
       if (!inAgent) showLogo();
       const { source: addSource, options: addOpts } = parseAddOptions(restArgs);
       await runAdd(addSource, addOpts);
+      break;
+    }
+    case 'use': {
+      const {
+        source: useSource,
+        options: useOptions,
+        errors: useErrors,
+      } = parseUseOptions(restArgs);
+      await runUse(useSource, useOptions, useErrors);
       break;
     }
     case 'remove':
