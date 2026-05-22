@@ -1,34 +1,37 @@
+import { spawn } from 'child_process';
 import { existsSync } from 'fs';
 import { cp, mkdir, mkdtemp, readdir, readFile, writeFile } from 'fs/promises';
 import { dirname, join, normalize, relative, resolve, sep } from 'path';
 import { tmpdir } from 'os';
+import { agents } from './agents.ts';
 import { tryBlobInstall, type BlobInstallResult, type BlobSkill } from './blob.ts';
 import { cloneRepo, cleanupTempDir, GitCloneError } from './git.ts';
 import { sanitizeName } from './installer.ts';
 import { getGitHubToken } from './skill-lock.ts';
 import { discoverSkills, filterSkills, getSkillDisplayName } from './skills.ts';
 import { getOwnerRepo, parseSource } from './source-parser.ts';
-import type { Skill } from './types.ts';
+import type { AgentType, Skill } from './types.ts';
 import {
   wellKnownProvider,
   type WellKnownSkill,
   type WellKnownFileContent,
 } from './providers/wellknown.ts';
 
-export interface UseOptions {
+export interface RunOptions {
   skill?: string;
+  agent?: string[];
   fullDepth?: boolean;
   dangerouslyAcceptOpenclawRisks?: boolean;
   help?: boolean;
 }
 
-export interface ParseUseOptionsResult {
+export interface ParseRunOptionsResult {
   source: string[];
-  options: UseOptions;
+  options: RunOptions;
   errors: string[];
 }
 
-export type UseSkill =
+export type RunSkill =
   | {
       kind: 'blob';
       name: string;
@@ -51,20 +54,40 @@ export type UseSkill =
       files: Map<string, WellKnownFileContent>;
     };
 
-export interface MaterializedUseSkill {
+export interface MaterializedRunSkill {
   tempRoot: string;
   skillDir: string;
   skillMd: string;
   hasSupportingFiles: boolean;
 }
 
+export interface AgentProcess {
+  on: (event: 'error' | 'close', listener: (...args: any[]) => void) => AgentProcess;
+}
+
+export type AgentSpawn = (
+  command: string,
+  args: string[],
+  options: { stdio: 'inherit' }
+) => AgentProcess;
+
+interface RunAgentConfig {
+  command: string;
+  args: string[];
+}
+
 const BLOB_ALLOWED_OWNERS = ['vercel', 'vercel-labs', 'heygen-com'];
 const EXCLUDE_FILES = new Set(['metadata.json']);
 const EXCLUDE_DIRS = new Set(['.git', '__pycache__', '__pypackages__']);
+const RUN_AGENT_CONFIGS: Partial<Record<AgentType, RunAgentConfig>> = {
+  'claude-code': { command: 'claude', args: [] },
+  codex: { command: 'codex', args: [] },
+};
+const SUPPORTED_RUN_AGENTS = Object.keys(RUN_AGENT_CONFIGS) as AgentType[];
 
-export function parseUseOptions(args: string[]): ParseUseOptionsResult {
+export function parseRunOptions(args: string[]): ParseRunOptionsResult {
   const source: string[] = [];
-  const options: UseOptions = {};
+  const options: RunOptions = {};
   const errors: string[] = [];
 
   for (let i = 0; i < args.length; i++) {
@@ -88,6 +111,20 @@ export function parseUseOptions(args: string[]): ParseUseOptionsResult {
         options.skill = value;
         i++;
       }
+    } else if (arg === '--agent' || arg === '-a') {
+      options.agent = options.agent || [];
+      i++;
+      let nextArg = args[i];
+      const startCount = options.agent.length;
+      while (i < args.length && nextArg && !nextArg.startsWith('-')) {
+        options.agent.push(nextArg);
+        i++;
+        nextArg = args[i];
+      }
+      if (options.agent.length === startCount) {
+        errors.push(`${arg} requires an agent name`);
+      }
+      i--;
     } else if (arg.startsWith('-')) {
       errors.push(`Unknown option: ${arg}`);
     } else {
@@ -95,10 +132,12 @@ export function parseUseOptions(args: string[]): ParseUseOptionsResult {
     }
   }
 
+  errors.push(...validateRunAgentOption(options.agent));
+
   return { source, options, errors };
 }
 
-export function buildUsePrompt(input: {
+export function buildRunPrompt(input: {
   skillMd: string;
   supportDir?: string;
   hasSupportingFiles: boolean;
@@ -118,8 +157,8 @@ export function buildUsePrompt(input: {
   return sections.join('\n\n') + '\n';
 }
 
-export async function materializeUseSkill(skill: UseSkill): Promise<MaterializedUseSkill> {
-  const tempRoot = await mkdtemp(join(tmpdir(), 'skills-use-'));
+export async function materializeRunSkill(skill: RunSkill): Promise<MaterializedRunSkill> {
+  const tempRoot = await mkdtemp(join(tmpdir(), 'skills-run-'));
   const skillDir = join(tempRoot, sanitizeName(skill.directoryName || skill.name));
 
   if (!isPathSafe(tempRoot, skillDir)) {
@@ -142,16 +181,16 @@ export async function materializeUseSkill(skill: UseSkill): Promise<Materialized
   return { tempRoot, skillDir, skillMd, hasSupportingFiles };
 }
 
-export async function runUse(
+export async function runRun(
   sourceArgs: string[],
-  options: UseOptions = {},
+  options: RunOptions = {},
   parseErrors: string[] = []
 ): Promise<void> {
   let cloneTempDir: string | null = null;
 
   try {
     if (options.help) {
-      console.log(getUseHelp());
+      console.log(getRunHelp());
       return;
     }
 
@@ -160,11 +199,16 @@ export async function runUse(
     }
 
     if (sourceArgs.length === 0) {
-      fail(`Missing required argument: source\n\n${getUseHelp()}`);
+      fail(`Missing required argument: source\n\n${getRunHelp()}`);
     }
 
     if (sourceArgs.length > 1) {
       fail(`Expected one source, received ${sourceArgs.length}: ${sourceArgs.join(', ')}`);
+    }
+
+    const runAgent = options.agent?.[0] as AgentType | undefined;
+    if (runAgent && !RUN_AGENT_CONFIGS[runAgent]) {
+      fail(formatUnsupportedAgentError(runAgent));
     }
 
     const source = sourceArgs[0]!;
@@ -177,7 +221,7 @@ export async function runUse(
         [
           'OpenClaw skills are unverified community submissions.',
           'Skills run with full agent permissions and could be malicious.',
-          `If you understand the risks, re-run with: skills use ${source} --dangerously-accept-openclaw-risks`,
+          `If you understand the risks, re-run with: skills run ${source} --dangerously-accept-openclaw-risks`,
         ].join('\n')
       );
     }
@@ -185,7 +229,7 @@ export async function runUse(
     const selector = resolveSelector(parsed.skillFilter, options.skill);
     const includeInternal = selector !== undefined;
 
-    let selectedSkill: UseSkill;
+    let selectedSkill: RunSkill;
 
     if (parsed.type === 'well-known') {
       const skills = await wellKnownProvider.fetchAllSkills(parsed.url);
@@ -252,50 +296,102 @@ export async function runUse(
       }
     }
 
-    const materialized = await materializeUseSkill(selectedSkill);
+    const materialized = await materializeRunSkill(selectedSkill);
     await cleanupClone(cloneTempDir);
     cloneTempDir = null;
 
-    process.stdout.write(
-      buildUsePrompt({
-        skillMd: materialized.skillMd,
-        supportDir: materialized.skillDir,
-        hasSupportingFiles: materialized.hasSupportingFiles,
-      })
-    );
+    const prompt = buildRunPrompt({
+      skillMd: materialized.skillMd,
+      supportDir: materialized.skillDir,
+      hasSupportingFiles: materialized.hasSupportingFiles,
+    });
+
+    if (runAgent) {
+      const exitCode = await runAgentInteractively(runAgent, prompt);
+      if (exitCode !== 0) {
+        process.exit(exitCode);
+      }
+      return;
+    }
+
+    process.stdout.write(prompt);
   } catch (error) {
     await cleanupClone(cloneTempDir);
     if (error instanceof GitCloneError) {
       fail(error.message);
     }
-    if (error instanceof UseCommandError) {
+    if (error instanceof RunCommandError) {
       fail(error.message);
     }
     fail(error instanceof Error ? error.message : 'Unknown error');
   }
 }
 
-function getUseHelp(): string {
-  return `Usage: skills use <source>[@<skill>] [options]
+export async function runAgentInteractively(
+  agent: AgentType,
+  prompt: string,
+  spawnImpl: AgentSpawn = spawnAgent
+): Promise<number> {
+  const config = RUN_AGENT_CONFIGS[agent];
+  if (!config) {
+    throw new RunCommandError(formatUnsupportedAgentError(agent));
+  }
+
+  return new Promise((resolve, reject) => {
+    const child = spawnImpl(config.command, [...config.args, prompt], {
+      stdio: 'inherit',
+    });
+    let settled = false;
+
+    child.on('error', (error: NodeJS.ErrnoException) => {
+      if (settled) return;
+      settled = true;
+      if (error.code === 'ENOENT') {
+        reject(
+          new RunCommandError(
+            `Could not launch ${agents[agent].displayName}: command not found: ${config.command}`
+          )
+        );
+        return;
+      }
+      reject(error);
+    });
+
+    child.on('close', (code: number | null) => {
+      if (settled) return;
+      settled = true;
+      resolve(code ?? 1);
+    });
+  });
+}
+
+function spawnAgent(command: string, args: string[]): AgentProcess {
+  return spawn(command, args, { stdio: 'inherit' }) as AgentProcess;
+}
+
+function getRunHelp(): string {
+  return `Usage: skills run <source>[@<skill>] [options]
 
 Generate a prompt for running one skill without installing it.
 
 Options:
   -s, --skill <skill>   Select the skill to use
+  -a, --agent <agent>   Start one supported agent interactively (${SUPPORTED_RUN_AGENTS.join(', ')})
   --full-depth          Search nested directories like skills add --full-depth
   --dangerously-accept-openclaw-risks
                          Allow unverified OpenClaw community skills
   -h, --help            Show this help message
 
 Examples:
-  skills use vercel-labs/agent-skills@nextjs
-  skills use vercel-labs/agent-skills --skill nextjs`;
+  skills run vercel-labs/agent-skills@nextjs | claude
+  skills run vercel-labs/agent-skills --skill nextjs --agent claude-code
+  skills run vercel-labs/agent-skills@nextjs --agent codex`;
 }
 
 function resolveSelector(sourceSelector?: string, optionSelector?: string): string | undefined {
   if (sourceSelector && optionSelector) {
     if (sourceSelector.toLowerCase() !== optionSelector.toLowerCase()) {
-      throw new UseCommandError(
+      throw new RunCommandError(
         `Conflicting skill selectors: source selects "${sourceSelector}" but --skill selects "${optionSelector}". Provide one selector.`
       );
     }
@@ -307,22 +403,22 @@ function resolveSelector(sourceSelector?: string, optionSelector?: string): stri
 
 function selectSkill(skills: Skill[], selector: string | undefined, source: string): Skill {
   if (skills.length === 0) {
-    throw new UseCommandError(
+    throw new RunCommandError(
       'No valid skills found. Skills require a SKILL.md with name and description.'
     );
   }
 
   if (!selector) {
     if (skills.length === 1) return skills[0]!;
-    throw new UseCommandError(formatMultipleSkillsError(source, skills.map(getSkillDisplayName)));
+    throw new RunCommandError(formatMultipleSkillsError(source, skills.map(getSkillDisplayName)));
   }
 
   const selected = filterSkills(skills, [selector]);
   if (selected.length === 0) {
-    throw new UseCommandError(formatNoMatchError(selector, skills.map(getSkillDisplayName)));
+    throw new RunCommandError(formatNoMatchError(selector, skills.map(getSkillDisplayName)));
   }
   if (selected.length > 1) {
-    throw new UseCommandError(`Skill selector "${selector}" matched multiple skills.`);
+    throw new RunCommandError(`Skill selector "${selector}" matched multiple skills.`);
   }
 
   return selected[0]!;
@@ -332,9 +428,9 @@ function selectWellKnownSkill(
   skills: WellKnownSkill[],
   selector: string | undefined,
   source: string
-): UseSkill {
+): RunSkill {
   if (skills.length === 0) {
-    throw new UseCommandError(
+    throw new RunCommandError(
       'No skills found at this URL. Make sure the server has a /.well-known/agent-skills/index.json or /.well-known/skills/index.json file.'
     );
   }
@@ -342,7 +438,7 @@ function selectWellKnownSkill(
   let selected: WellKnownSkill[];
   if (!selector) {
     if (skills.length !== 1) {
-      throw new UseCommandError(
+      throw new RunCommandError(
         formatMultipleSkillsError(
           source,
           skills.map((s) => s.installName)
@@ -357,7 +453,7 @@ function selectWellKnownSkill(
         skill.name.toLowerCase() === selector.toLowerCase()
     );
     if (selected.length === 0) {
-      throw new UseCommandError(
+      throw new RunCommandError(
         formatNoMatchError(
           selector,
           skills.map((s) => s.installName)
@@ -365,7 +461,7 @@ function selectWellKnownSkill(
       );
     }
     if (selected.length > 1) {
-      throw new UseCommandError(`Skill selector "${selector}" matched multiple skills.`);
+      throw new RunCommandError(`Skill selector "${selector}" matched multiple skills.`);
     }
   }
 
@@ -384,7 +480,7 @@ function formatMultipleSkillsError(source: string, names: string[]): string {
     'This source contains multiple skills. Specify exactly one skill:',
     ...names.map((name) => `  - ${name}`),
     '',
-    `Examples:\n  skills use ${source}@${names[0] ?? '<skill>'}\n  skills use ${source} --skill ${names[0] ?? '<skill>'}`,
+    `Examples:\n  skills run ${source}@${names[0] ?? '<skill>'}\n  skills run ${source} --skill ${names[0] ?? '<skill>'}`,
   ].join('\n');
 }
 
@@ -393,6 +489,37 @@ function formatNoMatchError(selector: string, names: string[]): string {
     `No matching skill found for: ${selector}`,
     'Available skills:',
     ...names.map((name) => `  - ${name}`),
+  ].join('\n');
+}
+
+function validateRunAgentOption(agentValues: string[] | undefined): string[] {
+  if (!agentValues || agentValues.length === 0) return [];
+
+  const errors: string[] = [];
+  const validAgents = Object.keys(agents);
+  const invalidAgents = agentValues.filter(
+    (agent) => agent !== '*' && !validAgents.includes(agent)
+  );
+
+  if (agentValues.includes('*')) {
+    errors.push("skills run --agent does not support '*'; specify exactly one agent.");
+  }
+  if (agentValues.length > 1) {
+    errors.push('skills run --agent accepts exactly one agent.');
+  }
+  if (invalidAgents.length > 0) {
+    errors.push(
+      `Invalid agents: ${invalidAgents.join(', ')}\nValid agents: ${validAgents.join(', ')}`
+    );
+  }
+
+  return errors;
+}
+
+function formatUnsupportedAgentError(agent: AgentType): string {
+  return [
+    `Running ${agents[agent].displayName} is not supported yet.`,
+    `Supported agents for skills run --agent: ${SUPPORTED_RUN_AGENTS.join(', ')}`,
   ].join('\n');
 }
 
@@ -512,4 +639,4 @@ function fail(message: string): never {
   process.exit(1);
 }
 
-class UseCommandError extends Error {}
+class RunCommandError extends Error {}
