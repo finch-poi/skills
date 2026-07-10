@@ -85,7 +85,12 @@ import {
   getLastSelectedAgents,
   saveSelectedAgents,
 } from './skill-lock.ts';
-import { addSkillToLocalLock, computeSkillFolderHash } from './local-lock.ts';
+import {
+  addSkillToLocalLock,
+  computeSkillFolderHash,
+  setAgentsInLocalLock,
+  readLocalLock,
+} from './local-lock.ts';
 import type { Skill, AgentType } from './types.ts';
 import {
   tryBlobInstall,
@@ -953,6 +958,16 @@ async function handleWellKnownSkills(
         }
       }
     }
+
+    // Persist the agent targets to the lock file so `experimental_install`
+    // can restore skills to the same agent directories.
+    if (!installGlobally && targetAgents.length > 0) {
+      try {
+        await setAgentsInLocalLock(targetAgents, cwd);
+      } catch {
+        // Don't fail installation if lock file update fails
+      }
+    }
   }
 
   if (successful.length > 0) {
@@ -1053,6 +1068,27 @@ export async function runAdd(args: string[], options: AddOptions = {}): Promise<
     options.skill = ['*'];
     options.agent = ['*'];
     options.yes = true;
+  }
+
+  // Read agents config from lock file as project-level default
+  // when no explicit -a flag is provided. This lets users run
+  // `skills add <pkg>` without re-specifying -a every time.
+  if (!options.agent || options.agent.length === 0) {
+    try {
+      const lock = await readLocalLock(process.cwd());
+      if (lock.agents && lock.agents.length > 0) {
+        const validAgentNames = Object.keys(agents);
+        const valid = lock.agents.filter((a) => validAgentNames.includes(a));
+        if (valid.length > 0) {
+          options.agent = valid;
+          p.log.info(
+            `Using agents from ${pc.cyan('skills-lock.json')}: ${valid.map((a) => pc.cyan(a)).join(', ')}`
+          );
+        }
+      }
+    } catch {
+      // Ignore lock file read errors — not critical for installation
+    }
   }
 
   // Auto-enable non-interactive mode when running inside an AI agent
@@ -1907,6 +1943,16 @@ export async function runAdd(args: string[], options: AddOptions = {}): Promise<
             // Don't fail installation if lock file update fails
           }
         }
+      }
+    }
+
+    // Persist the agent targets to the lock file so `experimental_install`
+    // can restore skills to the same agent directories.
+    if (!installGlobally && targetAgents.length > 0) {
+      try {
+        await setAgentsInLocalLock(targetAgents, cwd);
+      } catch {
+        // Don't fail installation if lock file update fails
       }
     }
 

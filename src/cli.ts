@@ -129,6 +129,9 @@ ${BOLD}Update Options:${RESET}
 
 ${BOLD}Project:${RESET}
   experimental_install Restore skills from skills-lock.json
+                       Reads optional top-level "agents" array from
+                       skills-lock.json to install to specific agent
+                       directories (e.g. ["claude-code","cursor"]).
   init [name]          Initialize a skill (creates <name>/SKILL.md or ./SKILL.md)
   experimental_sync    Sync skills from node_modules into agent directories
 

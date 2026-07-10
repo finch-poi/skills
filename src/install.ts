@@ -3,15 +3,47 @@ import pc from 'picocolors';
 import { readLocalLock } from './local-lock.ts';
 import { runAdd } from './add.ts';
 import { runSync, parseSyncOptions } from './sync.ts';
-import { getUniversalAgents } from './agents.ts';
+import { getUniversalAgents, agents } from './agents.ts';
+import type { AgentType } from './types.ts';
+
+/**
+ * Resolve the target agent list for `experimental_install`.
+ *
+ * If the lock file has a top-level `agents` array, those agent names are
+ * validated and used. Invalid names are warned about and dropped.
+ * When the `agents` field is absent or empty, the function falls back to
+ * the default universal agents (`.agents/skills/`).
+ */
+function resolveInstallAgents(lockAgents: string[] | undefined): AgentType[] {
+  const validAgentNames = Object.keys(agents);
+
+  if (lockAgents && lockAgents.length > 0) {
+    const valid = lockAgents.filter((a) => validAgentNames.includes(a));
+    const invalid = lockAgents.filter((a) => !validAgentNames.includes(a));
+
+    if (invalid.length > 0) {
+      p.log.warn(
+        `Unknown agents in skills-lock.json: ${invalid.join(', ')} — skipping. Valid: ${validAgentNames.join(', ')}`
+      );
+    }
+
+    if (valid.length > 0) {
+      return valid as AgentType[];
+    }
+  }
+
+  return getUniversalAgents();
+}
 import { buildLocalUpdateSource } from './update-source.ts';
 
 /**
  * Install all skills from the local skills-lock.json.
  * Groups skills by source and calls `runAdd` for each group.
  *
- * Only installs to .agents/skills/ (universal agents) -- the canonical
- * project-level location. Does not install to agent-specific directories.
+ * When the lock file contains a top-level `agents` array, skills are
+ * installed to those agent directories. Otherwise, skills are installed
+ * only to `.agents/skills/` (universal agents) — the canonical
+ * project-level location.
  *
  * node_modules skills are handled via experimental_sync.
  */
@@ -28,8 +60,8 @@ export async function runInstallFromLock(args: string[]): Promise<void> {
     return;
   }
 
-  // Only install to .agents/skills/ (universal agents)
-  const universalAgentNames = getUniversalAgents();
+  // Determine target agents: use lock-file `agents` config, or fall back to universal
+  const targetAgentNames = resolveInstallAgents(lock.agents);
 
   // Separate node_modules skills from remote skills
   const nodeModuleSkills: string[] = [];
@@ -61,8 +93,10 @@ export async function runInstallFromLock(args: string[]): Promise<void> {
 
   const remoteCount = skillEntries.length - nodeModuleSkills.length;
   if (remoteCount > 0) {
+    const agentDirs = targetAgentNames.map((a) => agents[a].skillsDir);
+    const uniqueDirs = [...new Set(agentDirs)];
     p.log.info(
-      `Restoring ${pc.cyan(String(remoteCount))} skill${remoteCount !== 1 ? 's' : ''} from skills-lock.json into ${pc.dim('.agents/skills/')}`
+      `Restoring ${pc.cyan(String(remoteCount))} skill${remoteCount !== 1 ? 's' : ''} from skills-lock.json into ${pc.dim(uniqueDirs.join(', '))}`
     );
   }
 
@@ -71,7 +105,7 @@ export async function runInstallFromLock(args: string[]): Promise<void> {
     try {
       await runAdd([source], {
         skill: skills,
-        agent: universalAgentNames,
+        agent: targetAgentNames,
         yes: true,
       });
     } catch (error) {
@@ -88,7 +122,7 @@ export async function runInstallFromLock(args: string[]): Promise<void> {
     );
     try {
       const { options: syncOptions } = parseSyncOptions(args);
-      await runSync(args, { ...syncOptions, yes: true, agent: universalAgentNames });
+      await runSync(args, { ...syncOptions, yes: true, agent: targetAgentNames });
     } catch (error) {
       p.log.error(
         `Failed to sync node_modules skills: ${error instanceof Error ? error.message : 'Unknown error'}`

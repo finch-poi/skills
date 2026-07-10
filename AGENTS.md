@@ -13,7 +13,7 @@ This file provides guidance to AI coding agents working on the `skills` CLI code
 | `skills`                      | Show banner with available commands                 |
 | `skills add <pkg>`            | Install skills from git repos, URLs, or local paths |
 | `skills use <pkg>@<skill>`    | Use one skill without installing                    |
-| `skills experimental_install` | Restore skills from skills-lock.json                |
+| `skills experimental_install` | Restore skills from skills-lock.json (reads optional `agents` array to target specific agent directories) |
 | `skills experimental_sync`    | Sync skills from node_modules into agent dirs       |
 | `skills list`                 | List installed skills (alias: `ls`)                 |
 | `skills update [skills...]`   | Update skills to latest versions                    |

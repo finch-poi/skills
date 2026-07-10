@@ -54,6 +54,15 @@ export interface LocalSkillLockEntry {
 export interface LocalSkillLockFile {
   /** Schema version for future migrations */
   version: number;
+  /**
+   * Optional list of agent type names (e.g. "claude-code", "cursor")
+   * that `experimental_install` should install skills to, instead of
+   * the default universal-only agents. This allows projects to declare
+   * that restored skills should go to agent-specific directories.
+   * When omitted or empty, `experimental_install` falls back to
+   * universal agents only (`.agents/skills/`).
+   */
+  agents?: string[];
   /** Map of skill name to its lock entry (sorted alphabetically) */
   skills: Record<string, LocalSkillLockEntry>;
 }
@@ -104,7 +113,11 @@ export async function writeLocalLock(lock: LocalSkillLockFile, cwd?: string): Pr
     sortedSkills[key] = lock.skills[key]!;
   }
 
-  const sorted: LocalSkillLockFile = { version: lock.version, skills: sortedSkills };
+  const sorted: LocalSkillLockFile = {
+    version: lock.version,
+    ...(lock.agents && lock.agents.length > 0 ? { agents: lock.agents } : {}),
+    skills: sortedSkills,
+  };
   const content = JSON.stringify(sorted, null, 2) + '\n';
   await writeFile(lockPath, content, 'utf-8');
 }
@@ -165,6 +178,24 @@ export async function addSkillToLocalLock(
 ): Promise<void> {
   const lock = await readLocalLock(cwd);
   lock.skills[skillName] = entry;
+  await writeLocalLock(lock, cwd);
+}
+
+/**
+ * Set the project-level `agents` configuration in the local lock file.
+ * This controls which agent directories `experimental_install` installs to.
+ * Pass an empty array or undefined to remove the configuration.
+ */
+export async function setAgentsInLocalLock(
+  agents: string[] | undefined,
+  cwd?: string
+): Promise<void> {
+  const lock = await readLocalLock(cwd);
+  if (agents && agents.length > 0) {
+    lock.agents = agents;
+  } else {
+    delete lock.agents;
+  }
   await writeLocalLock(lock, cwd);
 }
 

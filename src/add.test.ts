@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { existsSync, rmSync, mkdirSync, writeFileSync } from 'fs';
+import { existsSync, rmSync, mkdirSync, writeFileSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { runCli, stripAnsi } from './test-utils.ts';
@@ -219,6 +219,124 @@ description: Test
   it('should restore from lock file with experimental_install', () => {
     const result = runCli(['experimental_install'], testDir);
     expect(result.stdout).toContain('No project skills found in skills-lock.json');
+  });
+
+  it('should write agents config to skills-lock.json when installing with -a', () => {
+    // Create a test skill
+    const skillDir = join(testDir, 'skills', 'my-skill');
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(
+      join(skillDir, 'SKILL.md'),
+      `---
+name: my-skill
+description: My test skill
+---
+
+# My Skill
+
+Instructions here.
+`
+    );
+
+    const projectDir = join(testDir, 'project');
+    mkdirSync(projectDir, { recursive: true });
+
+    const result = runCli(
+      ['add', testDir, '-y', '--agent', 'claude-code'],
+      projectDir,
+      noDetectedAgentEnv
+    );
+    expect(result.exitCode).toBe(0);
+
+    // Check that skills-lock.json contains the agents config
+    const lockPath = join(projectDir, 'skills-lock.json');
+    expect(existsSync(lockPath)).toBe(true);
+    const lockContent = JSON.parse(readFileSync(lockPath, 'utf-8'));
+    expect(lockContent.agents).toBeDefined();
+    expect(lockContent.agents).toContain('claude-code');
+  });
+
+  it('should read agents from skills-lock.json as default when -a not specified', () => {
+    // Create a test skill
+    const skillDir = join(testDir, 'skills', 'my-skill');
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(
+      join(skillDir, 'SKILL.md'),
+      `---
+name: my-skill
+description: My test skill
+---
+
+# My Skill
+
+Instructions here.
+`
+    );
+
+    const projectDir = join(testDir, 'project');
+    mkdirSync(projectDir, { recursive: true });
+
+    // Pre-create a lock file with agents config
+    writeFileSync(
+      join(projectDir, 'skills-lock.json'),
+      JSON.stringify(
+        {
+          version: 1,
+          agents: ['claude-code'],
+          skills: {},
+        },
+        null,
+        2
+      ),
+      'utf-8'
+    );
+
+    // Add without -a — should read agents from lock file
+    const result = runCli(['add', testDir, '-y'], projectDir, noDetectedAgentEnv);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('skills-lock.json');
+    expect(result.stdout).toContain('claude-code');
+  });
+
+  it('should read agents config from skills-lock.json during experimental_install', () => {
+    const lockContent = {
+      version: 1,
+      agents: ['claude-code', 'aider-desk'],
+      skills: {
+        'fake-skill': {
+          source: 'fake/repo',
+          sourceType: 'github',
+          computedHash: 'abc123',
+        },
+      },
+    };
+    writeFileSync(join(testDir, 'skills-lock.json'), JSON.stringify(lockContent, null, 2), 'utf-8');
+
+    const result = runCli(['experimental_install'], testDir, noDetectedAgentEnv);
+    // Should mention the agent-specific directories, not just .agents/skills/
+    expect(result.stdout).toContain('.claude/skills');
+    expect(result.stdout).toContain('.aider-desk/skills');
+    // Should attempt to restore from the fake source (will fail but message shows)
+    expect(result.stdout).toContain('Restoring');
+  });
+
+  it('should warn about unknown agents in skills-lock.json during experimental_install', () => {
+    const lockContent = {
+      version: 1,
+      agents: ['claude-code', 'fake-agent'],
+      skills: {
+        'fake-skill': {
+          source: 'fake/repo',
+          sourceType: 'github',
+          computedHash: 'abc123',
+        },
+      },
+    };
+    writeFileSync(join(testDir, 'skills-lock.json'), JSON.stringify(lockContent, null, 2), 'utf-8');
+
+    const result = runCli(['experimental_install'], testDir, noDetectedAgentEnv);
+    expect(result.stdout).toContain('Unknown agents');
+    expect(result.stdout).toContain('fake-agent');
   });
 
   describe('internal skills', () => {

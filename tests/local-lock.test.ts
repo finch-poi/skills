@@ -9,6 +9,7 @@ import {
   removeSkillFromLocalLock,
   computeSkillFolderHash,
   getLocalLockPath,
+  setAgentsInLocalLock,
 } from '../src/local-lock.ts';
 
 describe('local-lock', () => {
@@ -134,9 +135,131 @@ describe('local-lock', () => {
         await rm(dir, { recursive: true, force: true });
       }
     });
+
+    it('preserves top-level agents field when writing', async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'lock-test-'));
+      try {
+        await writeLocalLock(
+          {
+            version: 1,
+            agents: ['claude-code', 'cursor'],
+            skills: {
+              'my-skill': {
+                source: 'org/repo',
+                sourceType: 'github',
+                computedHash: 'hash',
+              },
+            },
+          },
+          dir
+        );
+
+        const raw = await readFile(join(dir, 'skills-lock.json'), 'utf-8');
+        const parsed = JSON.parse(raw);
+        expect(parsed.agents).toEqual(['claude-code', 'cursor']);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('omits agents field when undefined or empty', async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'lock-test-'));
+      try {
+        await writeLocalLock(
+          {
+            version: 1,
+            skills: {
+              'my-skill': {
+                source: 'org/repo',
+                sourceType: 'github',
+                computedHash: 'hash',
+              },
+            },
+          },
+          dir
+        );
+
+        const raw = await readFile(join(dir, 'skills-lock.json'), 'utf-8');
+        const parsed = JSON.parse(raw);
+        expect(parsed.agents).toBeUndefined();
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('setAgentsInLocalLock', () => {
+    it('sets agents in an existing lock file', async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'lock-test-'));
+      try {
+        await addSkillToLocalLock(
+          'my-skill',
+          { source: 'org/repo', sourceType: 'github', computedHash: 'hash' },
+          dir
+        );
+
+        await setAgentsInLocalLock(['claude-code', 'cursor'], dir);
+
+        const lock = await readLocalLock(dir);
+        expect(lock.agents).toEqual(['claude-code', 'cursor']);
+        // Skills should be preserved
+        expect(lock.skills['my-skill']).toBeDefined();
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('removes agents when passed undefined', async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'lock-test-'));
+      try {
+        await setAgentsInLocalLock(['claude-code'], dir);
+        let lock = await readLocalLock(dir);
+        expect(lock.agents).toEqual(['claude-code']);
+
+        await setAgentsInLocalLock(undefined, dir);
+        lock = await readLocalLock(dir);
+        expect(lock.agents).toBeUndefined();
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('removes agents when passed empty array', async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'lock-test-'));
+      try {
+        await setAgentsInLocalLock(['claude-code'], dir);
+
+        await setAgentsInLocalLock([], dir);
+        const lock = await readLocalLock(dir);
+        expect(lock.agents).toBeUndefined();
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
   });
 
   describe('addSkillToLocalLock', () => {
+    it('preserves existing agents config when adding a skill', async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'lock-test-'));
+      try {
+        // Set up a lock file with agents
+        await setAgentsInLocalLock(['claude-code', 'cursor'], dir);
+
+        // Add a skill — agents should be preserved
+        await addSkillToLocalLock(
+          'new-skill',
+          { source: 'org/repo', sourceType: 'github', computedHash: 'hash123' },
+          dir
+        );
+
+        const lock = await readLocalLock(dir);
+        expect(lock.skills['new-skill']).toBeDefined();
+        expect(lock.agents).toEqual(['claude-code', 'cursor']);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
     it('adds a new skill to an empty lock', async () => {
       const dir = await mkdtemp(join(tmpdir(), 'lock-test-'));
       try {
