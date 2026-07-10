@@ -3,7 +3,7 @@ import * as p from '@clack/prompts';
 import pc from 'picocolors';
 import { existsSync } from 'fs';
 import { homedir } from 'os';
-import { sep, join, dirname } from 'path';
+import { sep, join, dirname, relative } from 'path';
 import { parseSource, getOwnerRepo, parseOwnerRepo, isRepoPrivate } from './source-parser.ts';
 import { stripTerminalEscapes } from './sanitize.ts';
 import { searchMultiselect } from './prompts/search-multiselect.ts';
@@ -46,7 +46,9 @@ export function getLockSource(parsedUrl: string, normalizedSource: string | null
 }
 
 export function getProjectLockSourceUrl(sourceType: string, sourceUrl: string): string | undefined {
-  return sourceType === 'git' || sourceType === 'gitlab' ? sourceUrl : undefined;
+  return sourceType === 'git' || sourceType === 'gitlab' || sourceType === 'github'
+    ? sourceUrl
+    : undefined;
 }
 import { cloneRepo, cleanupTempDir, GitCloneError } from './git.ts';
 import { discoverSkills, getSkillDisplayName, filterSkills } from './skills.ts';
@@ -56,6 +58,7 @@ import {
   isSkillInstalled,
   getCanonicalPath,
   installWellKnownSkillForAgent,
+  linkLocalSkill,
   type InstallMode,
 } from './installer.ts';
 import {
@@ -87,6 +90,7 @@ import {
 } from './skill-lock.ts';
 import {
   addSkillToLocalLock,
+  removeSkillFromLocalLock,
   computeSkillFolderHash,
   setAgentsInLocalLock,
   readLocalLock,
@@ -1773,6 +1777,12 @@ export async function runAdd(args: string[], options: AddOptions = {}): Promise<
             agent,
             { global: installGlobally, mode: installMode }
           );
+        } else if (parsed.type === 'local' && !installGlobally && !options.copy) {
+          // Local project skill: create a direct symlink to the source folder
+          // so edits are immediately visible in agent skill directories.
+          result = await linkLocalSkill(skill.path, skill.name, agent, {
+            eveSubagent: subagent,
+          });
         } else {
           // Disk-based install: copy from cloned/local directory
           result = await installSkillForAgent(skill, agent, {
@@ -1918,6 +1928,26 @@ export async function runAdd(args: string[], options: AddOptions = {}): Promise<
         const skillDisplayName = getSkillDisplayName(skill);
         if (successfulSkillNames.has(skillDisplayName)) {
           try {
+            // For local project skills, store the package root as `source`
+            // and the skill's relative path as `skillPath` (same structure
+            // as git sources). Skip hash — direct symlink means live edits.
+            if (parsed.type === 'local' && !installGlobally && !options.copy) {
+              const relSource = relative(cwd, parsed.localPath!).replace(/\\/g, '/');
+              const relSkill = relative(parsed.localPath!, skill.path).replace(/\\/g, '/');
+              const skillPathValue = relSkill ? `${relSkill}/SKILL.md` : 'SKILL.md';
+              await addSkillToLocalLock(
+                skill.name,
+                {
+                  source: relSource,
+                  sourceType: 'local',
+                  link: true,
+                  skillPath: skillPathValue,
+                  ...(recordSubagents && { subagents: eveSubagents }),
+                },
+                cwd
+              );
+              continue;
+            }
             // For blob skills, use the snapshot hash; for disk skills, compute from files
             const computedHash =
               blobResult && 'snapshotHash' in skill
@@ -1943,6 +1973,36 @@ export async function runAdd(args: string[], options: AddOptions = {}): Promise<
             // Don't fail installation if lock file update fails
           }
         }
+      }
+    }
+
+    // Sync local link entries: remove lock entries for skills whose source
+    // directory no longer exists on disk (e.g., user deleted a subdirectory
+    // under packages/skills/).
+    if (parsed.type === 'local' && !installGlobally && !options.copy) {
+      try {
+        const relSource = relative(cwd, parsed.localPath!).replace(/\\/g, '/');
+        const currentLock = await readLocalLock(cwd);
+        const installedNames = new Set(selectedSkills.map((s) => s.name).filter((n) => n));
+        for (const [lockName, lockEntry] of Object.entries(currentLock.skills)) {
+          if (
+            lockEntry.link &&
+            lockEntry.sourceType === 'local' &&
+            lockEntry.source === relSource &&
+            !installedNames.has(lockName)
+          ) {
+            await removeSkillFromLocalLock(lockName, cwd);
+            try {
+              const { removeCommand } = await import('./remove.ts');
+              await removeCommand([lockName], { yes: true, global: false });
+            } catch {
+              // Symlink may already be gone
+            }
+            p.log.info(pc.dim(`Removed ${lockName} from lock (source directory no longer exists)`));
+          }
+        }
+      } catch {
+        // Sync failure shouldn't block installation
       }
     }
 

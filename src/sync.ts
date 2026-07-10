@@ -199,6 +199,12 @@ export async function runSync(args: string[], options: SyncOptions = {}): Promis
     for (const skill of discoveredSkills) {
       const existingEntry = localLock.skills[skill.name];
       if (existingEntry) {
+        // Linked skills (direct symlinks) are always considered up to date —
+        // edits to the source are immediately visible.
+        if (existingEntry.link) {
+          upToDate.push(skill.name);
+          continue;
+        }
         // Compute current hash and compare
         const currentHash = await computeSkillFolderHash(skill.path);
         if (currentHash === existingEntry.computedHash) {

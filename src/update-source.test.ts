@@ -3,6 +3,7 @@ import {
   buildLocalUpdateSource,
   buildUpdateInstallSource,
   formatSourceInput,
+  resolveCloneUrl,
 } from './update-source.ts';
 
 describe('update-source', () => {
@@ -161,6 +162,47 @@ describe('update-source', () => {
         skillPath: 'skills/my-skill/SKILL.md',
       });
       expect(result).toBeNull();
+    });
+
+    it('prefers shorthand over sourceUrl for GitHub to preserve subpath appending', () => {
+      const result = buildLocalUpdateSource({
+        source: 'owner/repo',
+        sourceUrl: 'https://github.com/owner/repo.git',
+        sourceType: 'github',
+        ref: 'main',
+        skillPath: 'skills/my-skill/SKILL.md',
+      });
+      expect(result).toBe('owner/repo/skills/my-skill#main');
+    });
+  });
+
+  describe('resolveCloneUrl', () => {
+    it('returns sourceUrl when present', () => {
+      expect(
+        resolveCloneUrl({
+          source: 'owner/repo',
+          sourceUrl: 'https://github.com/owner/repo.git',
+          sourceType: 'github',
+        })
+      ).toBe('https://github.com/owner/repo.git');
+    });
+
+    it('converts GitHub shorthand to full URL for old lock entries', () => {
+      expect(
+        resolveCloneUrl({
+          source: 'anthropics/skills',
+          sourceType: 'github',
+        })
+      ).toBe('https://github.com/anthropics/skills.git');
+    });
+
+    it('returns source as-is for non-GitHub entries without sourceUrl', () => {
+      expect(
+        resolveCloneUrl({
+          source: 'https://gitlab.example.com/acme/skills.git',
+          sourceType: 'git',
+        })
+      ).toBe('https://gitlab.example.com/acme/skills.git');
     });
   });
 });

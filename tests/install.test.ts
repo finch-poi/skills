@@ -11,6 +11,9 @@ vi.mock('../src/sync.ts', () => ({
 }));
 vi.mock('../src/agents.ts', () => ({
   getUniversalAgents: vi.fn().mockReturnValue(['cursor']),
+  agents: {
+    cursor: { name: 'cursor', displayName: 'Cursor', skillsDir: '.agents/skills' },
+  },
 }));
 
 describe('runInstallFromLock', () => {

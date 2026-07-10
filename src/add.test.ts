@@ -520,8 +520,10 @@ describe('getProjectLockSourceUrl', () => {
     );
   });
 
-  it('keeps GitHub project locks compatible with existing shorthand entries', () => {
-    expect(getProjectLockSourceUrl('github', 'https://github.com/owner/repo.git')).toBeUndefined();
+  it('records sourceUrl for GitHub sources installed into project locks', () => {
+    expect(getProjectLockSourceUrl('github', 'https://github.com/owner/repo.git')).toBe(
+      'https://github.com/owner/repo.git'
+    );
   });
 });
 

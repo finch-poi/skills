@@ -1,20 +1,23 @@
 import * as p from '@clack/prompts';
 import pc from 'picocolors';
+import { resolve, join, dirname } from 'path';
 import { readLocalLock } from './local-lock.ts';
 import { runAdd } from './add.ts';
 import { runSync, parseSyncOptions } from './sync.ts';
 import { getUniversalAgents, agents } from './agents.ts';
 import type { AgentType } from './types.ts';
+import { linkLocalSkill } from './installer.ts';
+import { buildLocalUpdateSource } from './update-source.ts';
 
 /**
- * Resolve the target agent list for `experimental_install`.
+ * Resolve the target agent list for `experimental_install` and `update`.
  *
  * If the lock file has a top-level `agents` array, those agent names are
  * validated and used. Invalid names are warned about and dropped.
  * When the `agents` field is absent or empty, the function falls back to
  * the default universal agents (`.agents/skills/`).
  */
-function resolveInstallAgents(lockAgents: string[] | undefined): AgentType[] {
+export function resolveInstallAgents(lockAgents: string[] | undefined): AgentType[] {
   const validAgentNames = Object.keys(agents);
 
   if (lockAgents && lockAgents.length > 0) {
@@ -34,7 +37,6 @@ function resolveInstallAgents(lockAgents: string[] | undefined): AgentType[] {
 
   return getUniversalAgents();
 }
-import { buildLocalUpdateSource } from './update-source.ts';
 
 /**
  * Install all skills from the local skills-lock.json.
@@ -63,13 +65,20 @@ export async function runInstallFromLock(args: string[]): Promise<void> {
   // Determine target agents: use lock-file `agents` config, or fall back to universal
   const targetAgentNames = resolveInstallAgents(lock.agents);
 
-  // Separate node_modules skills from remote skills
+  // Separate skills by installation strategy
   const nodeModuleSkills: string[] = [];
+  const localLinkedSkills: Array<{ name: string; source: string; skillPath?: string }> = [];
   const bySource = new Map<string, { sourceType: string; skills: string[] }>();
 
   for (const [skillName, entry] of skillEntries) {
     if (entry.sourceType === 'node_modules') {
       nodeModuleSkills.push(skillName);
+      continue;
+    }
+
+    // Direct-symlink local skills: skip runAdd, link directly
+    if (entry.link && entry.sourceType === 'local') {
+      localLinkedSkills.push({ name: skillName, source: entry.source, skillPath: entry.skillPath });
       continue;
     }
 
@@ -91,13 +100,33 @@ export async function runInstallFromLock(args: string[]): Promise<void> {
     }
   }
 
-  const remoteCount = skillEntries.length - nodeModuleSkills.length;
+  const remoteCount = skillEntries.length - nodeModuleSkills.length - localLinkedSkills.length;
+  if (localLinkedSkills.length > 0) {
+    const agentDirs = targetAgentNames.map((a) => agents[a].skillsDir);
+    const uniqueDirs = [...new Set(agentDirs)];
+    p.log.info(
+      `Linking ${pc.cyan(String(localLinkedSkills.length))} local skill${localLinkedSkills.length !== 1 ? 's' : ''} into ${pc.dim(uniqueDirs.join(', '))}`
+    );
+  }
   if (remoteCount > 0) {
     const agentDirs = targetAgentNames.map((a) => agents[a].skillsDir);
     const uniqueDirs = [...new Set(agentDirs)];
     p.log.info(
       `Restoring ${pc.cyan(String(remoteCount))} skill${remoteCount !== 1 ? 's' : ''} from skills-lock.json into ${pc.dim(uniqueDirs.join(', '))}`
     );
+  }
+
+  // Link local skills (direct symlinks — no copy)
+  for (const { name, source, skillPath } of localLinkedSkills) {
+    // Resolve skill directory from source root + skillPath
+    const sourceRoot = resolve(cwd, source);
+    const skillDir = skillPath ? join(sourceRoot, dirname(skillPath)) : sourceRoot;
+    for (const agentType of targetAgentNames) {
+      const result = await linkLocalSkill(skillDir, name, agentType, { cwd });
+      if (!result.success && !result.skipped) {
+        p.log.error(`Failed to link ${pc.cyan(name)}: ${result.error ?? 'Unknown error'}`);
+      }
+    }
   }
 
   // Install remote skills grouped by source

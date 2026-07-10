@@ -33,8 +33,16 @@ export interface LocalSkillLockEntry {
    * SHA-256 hash computed from all files in the skill folder.
    * Unlike the global lock which uses GitHub tree SHA, the local lock
    * computes the hash from actual file contents on disk.
+   * Omitted for `link` entries (direct symlinks) where live editing is intended.
    */
-  computedHash: string;
+  computedHash?: string;
+  /**
+   * When true, the skill is installed as a direct symlink to the `source` path
+   * (relative to project root). No copy is made and no hash is tracked — edits
+   * to the source are immediately visible in agent skill directories.
+   * Only valid with `sourceType: "local"`.
+   */
+  link?: boolean;
   /**
    * Eve subagent targets this skill was installed into, so `update` can
    * restore the same placement. Each entry is an Eve subagent directory name;

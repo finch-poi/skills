@@ -65,11 +65,31 @@ function isBareShorthand(source: string): boolean {
 }
 
 function getLocalSource(entry: LocalUpdateSourceEntry): string | null {
+  // For GitHub shorthand sources, prefer the shorthand over sourceUrl so that
+  // appendFolderAndRef can append the skill subpath.  Full .git URLs cause
+  // supportsAppendedSubpath() to return false, dropping the subpath.
+  if (entry.sourceType === 'github' && isBareShorthand(entry.source)) {
+    return entry.source;
+  }
   if (entry.sourceUrl) {
     return entry.sourceUrl;
   }
   if (entry.sourceType === 'git' && isBareShorthand(entry.source)) {
     return null;
+  }
+  return entry.source;
+}
+
+/**
+ * Resolve a clonable git URL from a local lock entry.
+ * For backward compat with old lock files that don't store sourceUrl for
+ * GitHub sources, converts the shorthand "owner/repo" to
+ * "https://github.com/owner/repo.git".
+ */
+export function resolveCloneUrl(entry: LocalUpdateSourceEntry): string {
+  if (entry.sourceUrl) return entry.sourceUrl;
+  if (entry.sourceType === 'github' && isBareShorthand(entry.source)) {
+    return `https://github.com/${entry.source}.git`;
   }
   return entry.source;
 }

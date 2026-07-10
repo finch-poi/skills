@@ -1,16 +1,23 @@
 import { spawnSync } from 'child_process';
 import { existsSync, readdirSync } from 'fs';
-import { join, dirname, relative, sep } from 'path';
+import { join, dirname, relative, sep, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import * as p from '@clack/prompts';
 import pc from 'picocolors';
 
 import { readSkillLock, getGitHubToken, type SkillLockEntry } from './skill-lock.ts';
-import { computeSkillFolderHash, readLocalLock, type LocalSkillLockEntry } from './local-lock.ts';
+import {
+  computeSkillFolderHash,
+  readLocalLock,
+  addSkillToLocalLock,
+  removeSkillFromLocalLock,
+  type LocalSkillLockEntry,
+} from './local-lock.ts';
 import {
   formatSourceInput,
   buildUpdateInstallSource,
   buildLocalUpdateSource,
+  resolveCloneUrl,
 } from './update-source.ts';
 import { cloneRepo, cleanupTempDir } from './git.ts';
 import { discoverSkills } from './skills.ts';
@@ -19,6 +26,8 @@ import { removeCommand } from './remove.ts';
 import { sanitizeMetadata } from './sanitize.ts';
 import { track } from './telemetry.ts';
 import { agents, isUniversalAgent } from './agents.ts';
+import { resolveInstallAgents } from './install.ts';
+import { linkLocalSkill } from './installer.ts';
 import type { AgentType } from './types.ts';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -229,7 +238,11 @@ export async function getProjectSkillsForUpdate(
 
   for (const [name, entry] of Object.entries(localLock.skills)) {
     if (!matchesSkillFilter(name, skillFilter)) continue;
-    if (entry.sourceType === 'node_modules' || entry.sourceType === 'local') {
+    if (entry.sourceType === 'node_modules') {
+      continue;
+    }
+    // Local linked skills are included for re-linking; other local skills are skipped
+    if (entry.sourceType === 'local' && !entry.link) {
       continue;
     }
     skills.push({ name, source: entry.sourceUrl || entry.source, entry });
@@ -408,7 +421,8 @@ export async function updateGlobalSkills(
         }
       }
     } catch (error) {
-      console.log(`  ${DIM}✗ Failed to check skills from ${source}${RESET}`);
+      const msg = error instanceof Error ? error.message : String(error);
+      console.log(`  ${DIM}✗ Failed to check skills from ${source}: ${msg}${RESET}`);
     } finally {
       if (tempDir) await cleanupTempDir(tempDir);
     }
@@ -501,38 +515,139 @@ export async function updateProjectSkills(
     return { successCount, failCount, foundCount: 0 };
   }
 
-  const updatable = projectSkills.filter((s) => s.entry.skillPath);
-  const legacy = projectSkills.filter((s) => !s.entry.skillPath);
+  // Split skills into three categories:
+  // - linkSkills: local direct-symlink entries (re-link, no clone needed)
+  // - updatable: remote entries with skillPath (clone + update)
+  // - legacy: entries without skillPath that can't be updated in place
+  const linkSkills = projectSkills.filter((s) => s.entry.link && s.entry.sourceType === 'local');
+  const updatable = projectSkills.filter((s) => !s.entry.link && s.entry.skillPath);
+  const legacy = projectSkills.filter((s) => !s.entry.link && !s.entry.skillPath);
 
-  if (updatable.length === 0) {
+  if (updatable.length === 0 && linkSkills.length === 0) {
     console.log(`${DIM}No project skills can be updated in place.${RESET}`);
     printLegacyProjectSkills(legacy);
     return { successCount, failCount, foundCount: projectSkills.length };
   }
 
-  const cwd = process.cwd();
-  const targetAgentNames: string[] = [];
-  let hasUniversal = false;
+  const localLock = await readLocalLock();
 
-  for (const [type, config] of Object.entries(agents)) {
-    if (isUniversalAgent(type as AgentType)) {
-      if (!hasUniversal && existsSync(join(cwd, '.agents'))) {
-        hasUniversal = true;
-      }
-    } else {
-      const agentRoot = config.skillsDir.split('/')[0]!;
-      if (existsSync(join(cwd, agentRoot))) {
-        targetAgentNames.push(config.displayName);
-      }
-    }
-  }
+  // Resolve target agents from the lock file's `agents` config — same logic
+  // used by `experimental_install`. Falls back to universal agents when the
+  // field is absent or empty.
+  const targetAgents = resolveInstallAgents(localLock.agents);
+  const universalAgents = targetAgents.filter((a) => isUniversalAgent(a));
+  const nonUniversalAgents = targetAgents.filter((a) => !isUniversalAgent(a));
 
   const targetParts: string[] = [];
-  if (hasUniversal) targetParts.push('Universal');
-  targetParts.push(...targetAgentNames);
+  if (universalAgents.length > 0) targetParts.push('Universal');
+  targetParts.push(...nonUniversalAgents.map((a) => agents[a].displayName));
 
   if (targetParts.length > 0) {
     console.log(`${TEXT}Updating for: ${targetParts.join(', ')}${RESET}`);
+  }
+
+  // Sync local linked skills: discover current state of source directories,
+  // add new skills, remove gone skills, re-link existing ones.
+  if (linkSkills.length > 0) {
+    const cwd = process.cwd();
+
+    // Group link skills by source (same source = same directory to scan)
+    const byLinkSource = new Map<string, typeof linkSkills>();
+    for (const skill of linkSkills) {
+      const src = skill.entry.source;
+      const existing = byLinkSource.get(src) || [];
+      existing.push(skill);
+      byLinkSource.set(src, existing);
+    }
+
+    console.log(`${TEXT}Syncing ${linkSkills.length} local skill(s)...${RESET}`);
+
+    for (const [source, skillsForSource] of byLinkSource) {
+      const sourceRoot = resolve(cwd, source);
+      const lockedNames = new Set(skillsForSource.map((s) => s.name));
+
+      // Re-scan source directory to discover current skills
+      let discovered: Array<{ name: string; path: string }> = [];
+      if (existsSync(sourceRoot)) {
+        try {
+          discovered = await discoverSkills(sourceRoot);
+        } catch {
+          // Can't scan — just relink existing entries
+        }
+      }
+      const discoveredNames = new Set(discovered.map((s) => s.name));
+
+      // New skills: discovered but not in lock → add to lock + link
+      const newSkills = discovered.filter((s) => !lockedNames.has(s.name));
+      // Gone skills: in lock but not discovered → remove from lock + remove symlinks
+      const goneSkills = skillsForSource.filter((s) => !discoveredNames.has(s.name));
+      // Existing skills: still present → relink
+      const existingSkills = skillsForSource.filter((s) => discoveredNames.has(s.name));
+
+      for (const skill of newSkills) {
+        const safeName = sanitizeMetadata(skill.name);
+        const relSkill = relative(sourceRoot, skill.path).replace(/\\/g, '/');
+        const skillPathValue = relSkill ? `${relSkill}/SKILL.md` : 'SKILL.md';
+        await addSkillToLocalLock(
+          skill.name,
+          {
+            source,
+            sourceType: 'local',
+            link: true,
+            skillPath: skillPathValue,
+          },
+          cwd
+        );
+
+        let linked = false;
+        for (const agentType of targetAgents) {
+          const result = await linkLocalSkill(skill.path, skill.name, agentType, { cwd });
+          if (result.success) linked = true;
+        }
+        if (linked) {
+          successCount++;
+          console.log(`  ${TEXT}+${RESET} Linked ${safeName} ${DIM}(new)${RESET}`);
+        } else {
+          failCount++;
+          console.log(`  ${DIM}✗ Failed to link ${safeName}${RESET}`);
+        }
+      }
+
+      for (const skill of goneSkills) {
+        const safeName = sanitizeMetadata(skill.name);
+        await removeSkillFromLocalLock(skill.name, cwd);
+        try {
+          await removeCommand([skill.name], { yes: true, global: false });
+        } catch {
+          // Symlink may already be gone
+        }
+        console.log(`  ${DIM}-${RESET} Removed ${safeName} ${DIM}(source gone)${RESET}`);
+      }
+
+      for (const skill of existingSkills) {
+        const safeName = sanitizeMetadata(skill.name);
+        const skillDir = skill.entry.skillPath
+          ? join(sourceRoot, dirname(skill.entry.skillPath))
+          : sourceRoot;
+        let linked = false;
+        for (const agentType of targetAgents) {
+          const result = await linkLocalSkill(skillDir, skill.name, agentType, { cwd });
+          if (result.success) linked = true;
+        }
+        if (linked) {
+          successCount++;
+          console.log(`  ${TEXT}✓${RESET} Linked ${safeName}`);
+        } else {
+          failCount++;
+          console.log(`  ${DIM}✗ Failed to link ${safeName}${RESET}`);
+        }
+      }
+    }
+    console.log();
+  }
+
+  if (updatable.length === 0) {
+    return { successCount, failCount, foundCount: projectSkills.length };
   }
 
   console.log(`${TEXT}Refreshing ${updatable.length} skill(s)...${RESET}`);
@@ -546,7 +661,6 @@ export async function updateProjectSkills(
     bySource.set(source, existing);
   }
 
-  const localLock = await readLocalLock();
   const cliEntry = join(__dirname, '..', 'bin', 'cli.mjs');
 
   if (!existsSync(cliEntry)) {
@@ -556,7 +670,7 @@ export async function updateProjectSkills(
 
   for (const [source, skillsForSource] of bySource) {
     const firstEntry = skillsForSource[0]!.entry;
-    const sourceUrl = firstEntry.sourceUrl || firstEntry.source;
+    const cloneUrl = resolveCloneUrl(firstEntry);
     const ref = firstEntry.ref;
 
     const allLockedForSource = Object.entries(localLock.skills)
@@ -575,7 +689,7 @@ export async function updateProjectSkills(
     }
 
     try {
-      tempDir = await cloneRepo(sourceUrl, ref);
+      tempDir = await cloneRepo(cloneUrl, ref);
       const discovered = await discoverSkills(tempDir);
 
       const discoveredPaths = discovered.map((s) => {
@@ -592,7 +706,8 @@ export async function updateProjectSkills(
         discoveredPaths
       );
     } catch (error) {
-      console.log(`${DIM}✗ Failed to check for deleted skills from ${source}${RESET}`);
+      const msg = error instanceof Error ? error.message : String(error);
+      console.log(`${DIM}✗ Failed to check for deleted skills from ${source}: ${msg}${RESET}`);
     } finally {
       if (tempDir) {
         await cleanupTempDir(tempDir);

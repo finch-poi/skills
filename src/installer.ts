@@ -14,7 +14,7 @@ import {
   realpath,
 } from 'fs/promises';
 import { existsSync } from 'fs';
-import { join, basename, normalize, resolve, sep, relative, dirname, extname } from 'path';
+import { join, basename, normalize, resolve, sep, relative, dirname, extname, posix } from 'path';
 import { homedir, platform } from 'os';
 import type { Skill, AgentType, RemoteSkill } from './types.ts';
 import type { WellKnownSkill } from './providers/wellknown.ts';
@@ -559,6 +559,80 @@ export async function isSkillInstalled(
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Normalize any path to POSIX format (forward slashes only).
+ * Ensures lock-file paths and symlink resolution are consistent across platforms.
+ */
+function toPosixPath(p: string): string {
+  return p.replace(/\\/g, '/');
+}
+
+/**
+ * Create a direct symlink from the agent's skill directory to a local source
+ * path. No copy is made — edits to the source are immediately visible. This
+ * is used for project-local skills that live alongside the codebase (e.g.,
+ * `packages/skills/my-skill`).
+ */
+export async function linkLocalSkill(
+  sourcePath: string,
+  skillName: string,
+  agentType: AgentType,
+  options: { cwd?: string; eveSubagent?: string } = {}
+): Promise<InstallResult> {
+  const cwd = options.cwd || process.cwd();
+  const sanitized = sanitizeName(skillName);
+
+  const agentBase = getAgentBaseDir(agentType, false, cwd, options.eveSubagent);
+  const agentDir = join(agentBase, sanitized);
+  // Normalize to POSIX before resolving so paths from lock files (which
+  // always use forward slashes) work correctly on Windows too.
+  const resolvedSource = resolve(cwd, toPosixPath(sourcePath));
+
+  if (!isPathSafe(agentBase, agentDir)) {
+    return {
+      success: false,
+      path: agentDir,
+      mode: 'symlink',
+      error: 'Invalid skill name: potential path traversal detected',
+    };
+  }
+
+  // Don't create a symlink if source and destination overlap
+  if (pathsOverlap(resolvedSource, agentDir)) {
+    return {
+      success: true,
+      path: agentDir,
+      mode: 'symlink',
+      skipped: true,
+    };
+  }
+
+  try {
+    const symlinkCreated = await createSymlink(resolvedSource, agentDir);
+    if (!symlinkCreated) {
+      return {
+        success: false,
+        path: agentDir,
+        mode: 'symlink',
+        symlinkFailed: true,
+        error: 'Failed to create symlink (try running as administrator on Windows)',
+      };
+    }
+    return {
+      success: true,
+      path: agentDir,
+      mode: 'symlink',
+    };
+  } catch (error) {
+    return {
+      success: false,
+      path: agentDir,
+      mode: 'symlink',
+      error: error instanceof Error ? error.message : 'Unknown error',
+    };
   }
 }
 
