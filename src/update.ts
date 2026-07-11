@@ -29,6 +29,7 @@ import { agents, isUniversalAgent } from './agents.ts';
 import { resolveInstallAgents } from './install.ts';
 import { linkLocalSkill } from './installer.ts';
 import type { AgentType } from './types.ts';
+import { syncContextLinks } from './context-links.ts';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -823,6 +824,30 @@ export async function runUpdate(args: string[] = []): Promise<void> {
 
   if (options.skills && totalFound === 0) {
     console.log(`${DIM}No installed skills found matching: ${options.skills.join(', ')}${RESET}`);
+  }
+
+  // Re-sync context file links for project-scoped updates
+  if (scope === 'project' || scope === 'both') {
+    try {
+      const lock = await readLocalLock();
+      if (lock.contextFile && lock.agents && lock.agents.length > 0) {
+        const validAgentNames = Object.keys(agents);
+        const targetAgents = lock.agents.filter((a) => validAgentNames.includes(a)) as AgentType[];
+        if (targetAgents.length > 0) {
+          const results = await syncContextLinks(lock.contextFile, targetAgents);
+          for (const r of results) {
+            if (r.created) {
+              const loc = r.dir === '.' ? r.target : `${r.dir}/${r.target}`;
+              console.log(`${TEXT}Linked ${loc} -> ${r.source}${RESET}`);
+            } else if (r.warning) {
+              console.log(`${DIM}${r.warning}${RESET}`);
+            }
+          }
+        }
+      }
+    } catch {
+      // Don't fail update if context link sync fails
+    }
   }
 
   console.log();

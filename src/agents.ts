@@ -123,6 +123,7 @@ export const agents: Record<AgentType, AgentConfig> = {
     displayName: 'Claude Code',
     skillsDir: '.claude/skills',
     globalSkillsDir: join(claudeHome, 'skills'),
+    contextFile: 'CLAUDE.md',
     detectInstalled: async () => {
       return existsSync(claudeHome);
     },
@@ -190,6 +191,7 @@ export const agents: Record<AgentType, AgentConfig> = {
     displayName: 'Codex',
     skillsDir: '.agents/skills',
     globalSkillsDir: join(codexHome, 'skills'),
+    contextFile: 'AGENTS.md',
     detectInstalled: async () => {
       return existsSync(codexHome) || existsSync('/etc/codex');
     },
@@ -235,6 +237,7 @@ export const agents: Record<AgentType, AgentConfig> = {
     displayName: 'Cursor',
     skillsDir: '.agents/skills',
     globalSkillsDir: join(home, '.cursor/skills'),
+    contextFile: 'AGENTS.md',
     detectInstalled: async () => {
       return existsSync(join(home, '.cursor'));
     },
@@ -312,6 +315,7 @@ export const agents: Record<AgentType, AgentConfig> = {
     displayName: 'Gemini CLI',
     skillsDir: '.agents/skills',
     globalSkillsDir: join(home, '.gemini/skills'),
+    contextFile: 'GEMINI.md',
     detectInstalled: async () => {
       return existsSync(join(home, '.gemini'));
     },
@@ -475,6 +479,7 @@ export const agents: Record<AgentType, AgentConfig> = {
     displayName: 'OpenCode',
     skillsDir: '.agents/skills',
     globalSkillsDir: join(configHome, 'opencode/skills'),
+    contextFile: 'AGENTS.md',
     detectInstalled: async () => {
       return existsSync(join(configHome, 'opencode'));
     },

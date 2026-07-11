@@ -3,7 +3,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "version": "1.5.15",
+  "version": "1.5.15.1",
   "description": "The open agent skills ecosystem",
   "type": "module",
   "bin": {

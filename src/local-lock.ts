@@ -71,6 +71,15 @@ export interface LocalSkillLockFile {
    * universal agents only (`.agents/skills/`).
    */
   agents?: string[];
+  /**
+   * The project-root context file that serves as the single source of truth
+   * for agent instructions (e.g., "AGENTS.md"). When set, symlinks are
+   * created for each agent in `agents` whose own `contextFile` differs from
+   * this value. The source file is committed to git; the symlinks are
+   * gitignored and recreated by `experimental_install`.
+   * Defaults to "AGENTS.md" when not explicitly set.
+   */
+  contextFile?: string;
   /** Map of skill name to its lock entry (sorted alphabetically) */
   skills: Record<string, LocalSkillLockEntry>;
 }
@@ -124,6 +133,7 @@ export async function writeLocalLock(lock: LocalSkillLockFile, cwd?: string): Pr
   const sorted: LocalSkillLockFile = {
     version: lock.version,
     ...(lock.agents && lock.agents.length > 0 ? { agents: lock.agents } : {}),
+    ...(lock.contextFile ? { contextFile: lock.contextFile } : {}),
     skills: sortedSkills,
   };
   const content = JSON.stringify(sorted, null, 2) + '\n';
@@ -203,6 +213,24 @@ export async function setAgentsInLocalLock(
     lock.agents = agents;
   } else {
     delete lock.agents;
+  }
+  await writeLocalLock(lock, cwd);
+}
+
+/**
+ * Set the project-level `contextFile` in the local lock file.
+ * This is the source file for agent context file symlinks.
+ * Pass undefined to remove the configuration.
+ */
+export async function setContextFileInLocalLock(
+  contextFile: string | undefined,
+  cwd?: string
+): Promise<void> {
+  const lock = await readLocalLock(cwd);
+  if (contextFile) {
+    lock.contextFile = contextFile;
+  } else {
+    delete lock.contextFile;
   }
   await writeLocalLock(lock, cwd);
 }

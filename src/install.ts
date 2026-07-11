@@ -8,6 +8,7 @@ import { getUniversalAgents, agents } from './agents.ts';
 import type { AgentType } from './types.ts';
 import { linkLocalSkill } from './installer.ts';
 import { buildLocalUpdateSource } from './update-source.ts';
+import { syncContextLinks } from './context-links.ts';
 
 /**
  * Resolve the target agent list for `experimental_install` and `update`.
@@ -156,6 +157,23 @@ export async function runInstallFromLock(args: string[]): Promise<void> {
       p.log.error(
         `Failed to sync node_modules skills: ${error instanceof Error ? error.message : 'Unknown error'}`
       );
+    }
+  }
+
+  // Restore context file links (e.g., AGENTS.md -> CLAUDE.md symlinks)
+  if (lock.contextFile) {
+    try {
+      const results = await syncContextLinks(lock.contextFile, targetAgentNames, cwd);
+      for (const r of results) {
+        if (r.created) {
+          const loc = r.dir === '.' ? r.target : `${r.dir}/${r.target}`;
+          p.log.info(`Linked ${pc.cyan(loc)} → ${pc.dim(r.source)}`);
+        } else if (r.warning) {
+          p.log.warn(r.warning);
+        }
+      }
+    } catch {
+      // Don't fail install if context link sync fails
     }
   }
 }

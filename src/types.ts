@@ -94,6 +94,13 @@ export interface AgentConfig {
   showInUniversalList?: boolean;
   /** Whether to display this universal agent in the interactive locked section. Defaults to true. */
   showInUniversalPrompt?: boolean;
+  /**
+   * The project-root context file this agent reads (e.g., "CLAUDE.md", "AGENTS.md").
+   * When the lock file's `contextFile` differs from this value, a symlink is
+   * created so the agent finds its expected file pointing at the source.
+   * Omitted for agents without a well-known root-level context file.
+   */
+  contextFile?: string;
 }
 
 export interface ParsedSource {

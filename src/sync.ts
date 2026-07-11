@@ -14,6 +14,7 @@ import {
 } from './agents.ts';
 import { searchMultiselect } from './prompts/search-multiselect.ts';
 import { addSkillToLocalLock, computeSkillFolderHash, readLocalLock } from './local-lock.ts';
+import { detectContextFile, syncContextLinks } from './context-links.ts';
 import type { Skill, AgentType } from './types.ts';
 import { track } from './telemetry.ts';
 import { detectAgent, getAgentType } from './detect-agent.ts';
@@ -450,6 +451,23 @@ export async function runSync(args: string[], options: SyncOptions = {}): Promis
     successCount: String(successfulSkillNames.size),
     agents: targetAgents.join(','),
   });
+
+  // Sync context file links (e.g., AGENTS.md -> CLAUDE.md symlinks)
+  try {
+    const lock = await readLocalLock(cwd);
+    const contextFile = lock.contextFile || detectContextFile(cwd);
+    const results = await syncContextLinks(contextFile, targetAgents, cwd);
+    for (const r of results) {
+      if (r.created) {
+        const loc = r.dir === '.' ? r.target : `${r.dir}/${r.target}`;
+        p.log.info(`Linked ${pc.cyan(loc)} → ${pc.dim(r.source)}`);
+      } else if (r.warning) {
+        p.log.warn(r.warning);
+      }
+    }
+  } catch {
+    // Don't fail sync if context link sync fails
+  }
 
   console.log();
   p.outro(

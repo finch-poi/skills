@@ -51,3 +51,7 @@ package-lock.json
 bin/_chunks/
 bin/cli-wrapper.mjs
 bin/cli.d.mts
+
+# Managed by skills.sh -- agent context file symlinks
+CLAUDE.md
+GEMINI.md

@@ -93,9 +93,11 @@ import {
   removeSkillFromLocalLock,
   computeSkillFolderHash,
   setAgentsInLocalLock,
+  setContextFileInLocalLock,
   readLocalLock,
 } from './local-lock.ts';
 import type { Skill, AgentType } from './types.ts';
+import { detectContextFile, syncContextLinks } from './context-links.ts';
 import {
   tryBlobInstall,
   BLOB_ALLOWED_REPOS,
@@ -971,6 +973,26 @@ async function handleWellKnownSkills(
       } catch {
         // Don't fail installation if lock file update fails
       }
+    }
+
+    // Sync context file links (e.g., AGENTS.md -> CLAUDE.md symlinks)
+    try {
+      const lock = await readLocalLock(cwd);
+      const contextFile = lock.contextFile || detectContextFile(cwd);
+      if (!lock.contextFile) {
+        await setContextFileInLocalLock(contextFile, cwd);
+      }
+      const results = await syncContextLinks(contextFile, targetAgents, cwd);
+      for (const r of results) {
+        if (r.created) {
+          const loc = r.dir === '.' ? r.target : `${r.dir}/${r.target}`;
+          p.log.info(`Linked ${pc.cyan(loc)} → ${pc.dim(r.source)}`);
+        } else if (r.warning) {
+          p.log.warn(r.warning);
+        }
+      }
+    } catch {
+      // Don't fail installation if context link sync fails
     }
   }
 
@@ -2013,6 +2035,31 @@ export async function runAdd(args: string[], options: AddOptions = {}): Promise<
         await setAgentsInLocalLock(targetAgents, cwd);
       } catch {
         // Don't fail installation if lock file update fails
+      }
+    }
+
+    // Sync context file links (e.g., AGENTS.md -> CLAUDE.md symlinks)
+    if (!installGlobally && targetAgents.length > 0) {
+      try {
+        // Read contextFile from lock, or auto-detect
+        const lock = await readLocalLock(cwd);
+        const contextFile = lock.contextFile || detectContextFile(cwd);
+        // Persist to lock so experimental_install can restore
+        if (!lock.contextFile) {
+          await setContextFileInLocalLock(contextFile, cwd);
+        }
+        // Create symlinks for agents whose contextFile differs
+        const results = await syncContextLinks(contextFile, targetAgents, cwd);
+        for (const r of results) {
+          if (r.created) {
+            const loc = r.dir === '.' ? r.target : `${r.dir}/${r.target}`;
+            p.log.info(`Linked ${pc.cyan(loc)} → ${pc.dim(r.source)}`);
+          } else if (r.warning) {
+            p.log.warn(r.warning);
+          }
+        }
+      } catch {
+        // Don't fail installation if context link sync fails
       }
     }
 
